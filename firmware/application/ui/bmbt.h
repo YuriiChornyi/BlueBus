@@ -116,6 +116,13 @@
 #define BMBT_MENU_IDX_FIRST_DEVICE 2
 #define BMBT_MENU_TIMER_WRITE_INT 100
 #define BMBT_MENU_TIMER_WRITE_TIMEOUT 500
+// How long to coalesce metadata-driven Dashboard redraws for. Phones often
+// deliver the metadata for a new track in two steps (title first, then the
+// artist and album), and every redraw is a visible repaint on the GT
+#define BMBT_DASHBOARD_METADATA_DEBOUNCE 300
+#define BMBT_DASHBOARD_METADATA_DEBOUNCE_START \
+    ((BMBT_MENU_TIMER_WRITE_TIMEOUT - BMBT_DASHBOARD_METADATA_DEBOUNCE) / BMBT_MENU_TIMER_WRITE_INT)
+#define BMBT_DASHBOARD_HASH_NONE 0
 #define BMBT_HEADER_TIMER_WRITE_INT 100
 #define BMBT_HEADER_TIMER_WRITE_TIMEOUT 500
 #define BMBT_MENU_HEADER_TIMER_OFF 0xFF
@@ -185,6 +192,7 @@ typedef struct BMBTContext_t {
     uint8_t navSilenced: 1;
     uint8_t navRange: 1;
     uint32_t navZoomTime;
+    uint32_t dashboardHash;
     UtilsAbstractDisplayValue_t mainDisplay;
 } BMBTContext_t;
 

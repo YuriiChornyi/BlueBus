@@ -473,6 +473,33 @@ static void BMBTTriggerWriteHeader(BMBTContext_t *context)
 }
 
 /**
+ * BMBTMenuIsOnScreen()
+ *     Description:
+ *         Whether one of our menus is currently drawn on a GT that we can
+ *         refresh in place (the "new UI" Nav path of BMBTTriggerWriteMenu).
+ *         On these units the radio writing its main area does not disturb
+ *         the index area, so a menu refresh in response to it only causes
+ *         the GT to repaint an unchanged menu.
+ *     Params:
+ *         BMBTContext_t *context - The context
+ *     Returns:
+ *         uint8_t - 1 if the menu is drawn and refreshable, 0 otherwise
+ */
+static uint8_t BMBTMenuIsOnScreen(BMBTContext_t *context)
+{
+    if (
+        context->menu == BMBT_MENU_NONE ||
+        context->menu == BMBT_MENU_DASHBOARD_FRESH ||
+        context->ibus->gtVersion < IBUS_GT_MKIII_NEW_UI ||
+        context->status.radType == IBUS_RADIO_TYPE_C43 ||
+        context->ibus->moduleStatus.NAV == 0
+    ) {
+        return 0;
+    }
+    return 1;
+}
+
+/**
  * BMBTTriggerWriteMenu()
  *     Description:
  *         Trigger the counter that fires off our menu writing
@@ -496,12 +523,34 @@ static void BMBTTriggerWriteMenu(BMBTContext_t *context, uint8_t force)
         context->status.radType == IBUS_RADIO_TYPE_C43 ||
         context->ibus->moduleStatus.NAV == 0
     ) {
+        // A full rewrite is wanted, so the Dashboard must not be skipped
+        // as "unchanged" when the timer fires
+        context->dashboardHash = BMBT_DASHBOARD_HASH_NONE;
         if (context->timerMenuIntervals == BMBT_MENU_HEADER_TIMER_OFF) {
             context->timerMenuIntervals = 0;
             TimerResetScheduledTask(context->menuWriteTaskId);
         }
     } else {
         BMBTMenuRefresh(context);
+    }
+}
+
+/**
+ * BMBTTriggerWriteDashboard()
+ *     Description:
+ *         Schedule a Dashboard redraw for new metadata through the menu
+ *         write timer, shortened to the debounce window. If a menu write
+ *         is already pending it will pick up the latest metadata anyway.
+ *     Params:
+ *         BMBTContext_t *context - The context
+ *     Returns:
+ *         void
+ */
+static void BMBTTriggerWriteDashboard(BMBTContext_t *context)
+{
+    if (context->timerMenuIntervals == BMBT_MENU_HEADER_TIMER_OFF) {
+        context->timerMenuIntervals = BMBT_DASHBOARD_METADATA_DEBOUNCE_START;
+        TimerResetScheduledTask(context->menuWriteTaskId);
     }
 }
 
@@ -975,6 +1024,75 @@ static void BMBTMenuDashboardUpdate(BMBTContext_t *context, char *f1, char *f2, 
     }
 }
 
+/**
+ * BMBTHashString()
+ *     Description:
+ *         Fold a string into a running 32-bit FNV-1a hash
+ *     Params:
+ *         uint32_t hash - The running hash
+ *         const char *str - The string to fold in
+ *     Returns:
+ *         uint32_t - The updated hash
+ */
+static uint32_t BMBTHashString(uint32_t hash, const char *str)
+{
+    while (*str != '\0') {
+        hash ^= (uint8_t) *str;
+        hash *= 16777619UL;
+        str++;
+    }
+    // Separate fields so "ab" + "c" != "a" + "bc"
+    hash ^= 0xFF;
+    hash *= 16777619UL;
+    return hash;
+}
+
+/**
+ * BMBTMenuDashboardHash()
+ *     Description:
+ *         Hash everything the Dashboard track fields are derived from, so
+ *         we can tell whether a redraw would change what is on screen
+ *     Params:
+ *         BMBTContext_t *context - The context
+ *     Returns:
+ *         uint32_t - The hash of the current metadata
+ */
+static uint32_t BMBTMenuDashboardHash(BMBTContext_t *context)
+{
+    uint32_t hash = 2166136261UL;
+    hash = BMBTHashString(hash, context->bt->title);
+    hash = BMBTHashString(hash, context->bt->artist);
+    hash = BMBTHashString(hash, context->bt->album);
+    hash ^= context->bt->playbackStatus;
+    hash *= 16777619UL;
+    if (hash == BMBT_DASHBOARD_HASH_NONE) {
+        hash = 1;
+    }
+    return hash;
+}
+
+/**
+ * BMBTMenuDashboardIsCurrent()
+ *     Description:
+ *         Whether the Dashboard is on screen and already shows the
+ *         current metadata, in which case a redraw is a no-op repaint
+ *     Params:
+ *         BMBTContext_t *context - The context
+ *     Returns:
+ *         uint8_t - 1 if the Dashboard is up to date, 0 otherwise
+ */
+static uint8_t BMBTMenuDashboardIsCurrent(BMBTContext_t *context)
+{
+    if (
+        context->menu == BMBT_MENU_DASHBOARD &&
+        context->dashboardHash != BMBT_DASHBOARD_HASH_NONE &&
+        context->dashboardHash == BMBTMenuDashboardHash(context)
+    ) {
+        return 1;
+    }
+    return 0;
+}
+
 static void BMBTMenuDashboard(BMBTContext_t *context)
 {
     char title[BT_METADATA_FIELD_SIZE] = {0};
@@ -1009,6 +1127,7 @@ static void BMBTMenuDashboard(BMBTContext_t *context)
     }
     BMBTMenuDashboardUpdate(context, title, artist, album);
     context->menu = BMBT_MENU_DASHBOARD;
+    context->dashboardHash = BMBTMenuDashboardHash(context);
 }
 
 static void BMBTMenuDeviceSelection(BMBTContext_t *context)
@@ -2921,10 +3040,14 @@ void BMBTBTMetadata(void *ctx, uint8_t *data)
             );
             BMBTSetMainDisplayText(context, text, 0, 1);
         }
-        if (
-            context->menu == BMBT_MENU_DASHBOARD ||
-            context->menu == BMBT_MENU_DASHBOARD_FRESH
-        ) {
+        if (context->menu == BMBT_MENU_DASHBOARD) {
+            // The Dashboard is already drawn. Only repaint it if the
+            // metadata actually changed, and coalesce the redraws since
+            // the phone may send the track in several pieces
+            if (BMBTMenuDashboardIsCurrent(context) == 0) {
+                BMBTTriggerWriteDashboard(context);
+            }
+        } else if (context->menu == BMBT_MENU_DASHBOARD_FRESH) {
             BMBTMenuDashboard(context);
         }
     }
@@ -3765,6 +3888,13 @@ void BMBTRADUpdateMainArea(void *ctx, uint8_t *pkt)
         context->status.playerMode == BMBT_MODE_ACTIVE &&
         textIsOurs == 0
     ) {
+        // The radio rewrites its main area on every track change. If our
+        // menu is already on screen, refreshing it again only makes the
+        // GT repaint an unchanged menu, which shows as a flicker
+        uint8_t menuOnScreen = 0;
+        if (context->status.displayMode == BMBT_DISPLAY_ON) {
+            menuOnScreen = BMBTMenuIsOnScreen(context);
+        }
         uint8_t pktLen = (uint8_t) pkt[IBUS_PKT_LEN] + 2;
         uint8_t textLen = 0;
         if (pktLen > 7) {
@@ -3819,7 +3949,10 @@ void BMBTRADUpdateMainArea(void *ctx, uint8_t *pkt)
             }
             if (context->status.displayMode == BMBT_DISPLAY_ON) {
                 BMBTTriggerWriteHeader(context);
-                if (context->status.menuState != BMBT_MENU_STATE_PRESS) {
+                if (
+                    context->status.menuState != BMBT_MENU_STATE_PRESS &&
+                    menuOnScreen == 0
+                ) {
                     BMBTTriggerWriteMenu(context, BMBT_NO_FORCE);
                 }
             }
@@ -3996,7 +4129,11 @@ void BMBTTimerMenuWrite(void *ctx)
                         break;
                     case BMBT_MENU_DASHBOARD:
                     case BMBT_MENU_DASHBOARD_FRESH:
-                        BMBTMenuDashboard(context);
+                        // Debounced metadata redraws land here. A forced
+                        // rewrite clears the hash so it always goes through
+                        if (BMBTMenuDashboardIsCurrent(context) == 0) {
+                            BMBTMenuDashboard(context);
+                        }
                         break;
                     case BMBT_MENU_DEVICE_SELECTION:
                         BMBTMenuDeviceSelection(context);
