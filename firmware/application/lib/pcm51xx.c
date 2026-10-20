@@ -77,6 +77,27 @@ void PCM51XXSetVolume(unsigned char volume)
 }
 
 /**
+ * PCM51XXSetVolumeFast()
+ *     Description:
+ *         Set the PCM51XX Volume without polling or logging. Intended for
+ *         callers that write the volume registers many times per second
+ *         (i.e. a software volume ramp), where the poll and the log output
+ *         would dominate the loop time.
+ *     Params:
+ *         unsigned char volume - The volume register value
+ *     Returns:
+ *         int8_t - The I2C status
+ */
+int8_t PCM51XXSetVolumeFast(unsigned char volume)
+{
+    int8_t status = I2CWrite(PCM51XX_I2C_ADDR, PCM51XX_REGISTER_VOLL, volume);
+    if (status != 0x00) {
+        return status;
+    }
+    return I2CWrite(PCM51XX_I2C_ADDR, PCM51XX_REGISTER_VOLR, volume);
+}
+
+/**
  * PCM51XXStartup()
  *     Description:
  *         Initialize our PCM51XX by powering it up and setting the volume

@@ -50,6 +50,8 @@ void HandlerInit(BT_t *bt, IBus_t *ibus)
     Context.telMode = HANDLER_TEL_MODE_AUDIO;
     Context.telVolSteps = 0;
     Context.btBootState = HANDLER_BT_BOOT_OK;
+    Context.audioFadeState = HANDLER_AUDIO_FADE_STATE_IDLE;
+    Context.audioFadeDeadline = 0;
     memset(&Context.gmState, 0, sizeof(HandlerBodyModuleStatus_t));
     memset(&Context.lmState, 0, sizeof(HandlerLightControlStatus_t));
     Context.powerStatus = HANDLER_POWER_ON;

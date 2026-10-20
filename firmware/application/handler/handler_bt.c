@@ -150,7 +150,61 @@ void HandlerBTInit(HandlerContext_t *context)
             context,
             HANDLER_INT_BM83_POWER_RESET
         );
+#if HANDLER_AUDIO_FADE_ENABLED
+        // The fade relies on the AVRCP track change notification, which
+        // only the BM83 stack surfaces, so the BC127 keeps today's behavior
+        EventRegisterCallback(
+            BT_EVENT_TRACK_SKIP,
+            &HandlerBTTrackSkip,
+            context
+        );
+        context->audioFadeTimerId = TimerRegisterScheduledTask(
+            &HandlerTimerBTAudioFade,
+            context,
+            TIMER_TASK_DISABLED
+        );
+#endif
     }
+}
+
+/**
+ * HandlerBTAudioFadeCancel()
+ *     Description:
+ *         Abort a track skip fade and put the DAC back to the configured
+ *         volume immediately. Safe to call when no fade is running.
+ *     Params:
+ *         HandlerContext_t *context - The handler context
+ *     Returns:
+ *         void
+ */
+static void HandlerBTAudioFadeCancel(HandlerContext_t *context)
+{
+    if (context->audioFadeState == HANDLER_AUDIO_FADE_STATE_IDLE) {
+        return;
+    }
+    context->audioFadeState = HANDLER_AUDIO_FADE_STATE_IDLE;
+    TimerSetTaskInterval(context->audioFadeTimerId, TIMER_TASK_DISABLED);
+    // Use the polling setter so a dirty I2C bus gets recovered on the way
+    PCM51XXSetVolume(ConfigGetSetting(CONFIG_SETTING_DAC_AUDIO_VOL));
+    LogDebug(LOG_SOURCE_SYSTEM, "FADE: Cancel");
+}
+
+/**
+ * HandlerBTAudioFadeIn()
+ *     Description:
+ *         Begin ramping the DAC volume from wherever it is now back up to
+ *         the configured volume
+ *     Params:
+ *         HandlerContext_t *context - The handler context
+ *     Returns:
+ *         void
+ */
+static void HandlerBTAudioFadeIn(HandlerContext_t *context)
+{
+    context->audioFadeFrom = context->audioFadeVolume;
+    context->audioFadeRampStart = TimerGetMillis();
+    context->audioFadeState = HANDLER_AUDIO_FADE_STATE_IN;
+    LogDebug(LOG_SOURCE_SYSTEM, "FADE: In");
 }
 
 /**
@@ -221,10 +275,12 @@ static void HandlerBTConnect(HandlerContext_t *context)
  */
 void HandlerBTCallStatus(void *ctx, uint8_t *data)
 {
+    HandlerContext_t *context = (HandlerContext_t *) ctx;
+    // Never leave the DAC attenuated going into or out of a call
+    HandlerBTAudioFadeCancel(context);
     if (ConfigGetSetting(CONFIG_SETTING_HFP) == CONFIG_SETTING_OFF) {
         return;
     }
-    HandlerContext_t *context = (HandlerContext_t *) ctx;
     // If we were playing before the call, try to resume playback
     if (
         context->bt->callStatus == BT_CALL_INACTIVE &&
@@ -431,6 +487,7 @@ void HandlerBTCallerID(void *ctx, uint8_t *data)
 void HandlerBTDeviceDisconnected(void *ctx, uint8_t *data)
 {
     HandlerContext_t *context = (HandlerContext_t *) ctx;
+    HandlerBTAudioFadeCancel(context);
     // Reset the metadata so we do not display incorrect data
     BTClearMetadata(context->bt);
     if (context->bt->type == BT_BTM_TYPE_BC127) {
@@ -574,6 +631,13 @@ void HandlerBTDeviceLinkConnected(void *ctx, uint8_t *data)
 void HandlerBTDeviceLinkDisconnected(void *ctx, uint8_t *data)
 {
     HandlerContext_t *context = (HandlerContext_t *) ctx;
+    // Without A2DP or AVRCP the track change will never arrive
+    if (
+        context->bt->activeDevice.a2dpId == 0 ||
+        context->bt->activeDevice.avrcpId == 0
+    ) {
+        HandlerBTAudioFadeCancel(context);
+    }
     if (
         ConfigGetSetting(CONFIG_SETTING_HFP) == CONFIG_SETTING_ON &&
         context->ibus->ignitionStatus > IBUS_IGNITION_OFF &&
@@ -713,6 +777,47 @@ void HandlerBTTimeUpdate(void *ctx, uint8_t *dt)
 /* BC127 Specific Handlers */
 
 /**
+ * HandlerBTTrackSkip()
+ *     Description:
+ *         A Next / Previous track command was just sent to the module. Start
+ *         fading the DAC out so the tail of the old track is not heard while
+ *         the phone takes its time switching tracks.
+ *     Params:
+ *         void *ctx - The context provided at registration
+ *         uint8_t *tmp - Any event data
+ *     Returns:
+ *         void
+ */
+void HandlerBTTrackSkip(void *ctx, uint8_t *data)
+{
+    HandlerContext_t *context = (HandlerContext_t *) ctx;
+    // Call audio goes through the same DAC, leave it alone
+    if (context->bt->callStatus != BT_CALL_INACTIVE) {
+        return;
+    }
+    uint32_t now = TimerGetMillis();
+    switch (context->audioFadeState) {
+        case HANDLER_AUDIO_FADE_STATE_IDLE:
+            context->audioFadeVolume = ConfigGetSetting(CONFIG_SETTING_DAC_AUDIO_VOL);
+            // Fall through
+        case HANDLER_AUDIO_FADE_STATE_IN:
+            // Ramp down from wherever the volume is right now
+            context->audioFadeFrom = context->audioFadeVolume;
+            context->audioFadeRampStart = now;
+            context->audioFadeState = HANDLER_AUDIO_FADE_STATE_OUT;
+            TimerSetTaskInterval(context->audioFadeTimerId, HANDLER_INT_AUDIO_FADE);
+            TimerResetScheduledTask(context->audioFadeTimerId);
+            LogDebug(LOG_SOURCE_SYSTEM, "FADE: Out");
+            break;
+        default:
+            // Already faded out (or fading out) - nothing to do but wait
+            break;
+    }
+    // Every skip pushes the fallback deadline out again
+    context->audioFadeDeadline = now + HANDLER_AUDIO_FADE_WAIT_MAX_MS;
+}
+
+/**
  * HandlerBTBC127Boot()
  *     Description:
  *         If the BC127 module restarts, reset our internal state
@@ -790,6 +895,14 @@ void HandlerBTBM83AVRCPUpdates(void *ctx, uint8_t *data)
     } else if (type == BM83_AVRCP_EVT_PLAYBACK_TRACK_CHANGED) {
         // On AVRCP "Change"
         if (status != BM83_DATA_AVC_RSP_INTERIM) {
+            // The phone switched tracks. Its audio stream lags the AVRCP
+            // notification, so give it a moment before fading back in
+            if (context->audioFadeState != HANDLER_AUDIO_FADE_STATE_IDLE) {
+                uint32_t settled = TimerGetMillis() + HANDLER_AUDIO_FADE_SETTLE_MS;
+                if (settled < context->audioFadeDeadline) {
+                    context->audioFadeDeadline = settled;
+                }
+            }
             context->bt->avrcpUpdates = UTILS_SET_BIT(
                 context->bt->avrcpUpdates,
                 BT_AVRCP_ACTION_SET_TRACK_CHANGE_NOTIF
@@ -882,6 +995,67 @@ void HandlerBTBM83BootStatus(void *ctx, uint8_t *data)
 }
 
 /* Timers */
+/**
+ * HandlerTimerBTAudioFade()
+ *     Description:
+ *         Step the track skip fade. Only runs while a fade is active:
+ *         OUT -> ramp to mute, WAIT -> hold until the deadline,
+ *         IN -> ramp back to the configured volume, then disable ourselves
+ *     Params:
+ *         void *ctx - The context provided at registration
+ *     Returns:
+ *         void
+ */
+void HandlerTimerBTAudioFade(void *ctx)
+{
+    HandlerContext_t *context = (HandlerContext_t *) ctx;
+    uint32_t now = TimerGetMillis();
+    uint32_t elapsed = now - context->audioFadeRampStart;
+    switch (context->audioFadeState) {
+        case HANDLER_AUDIO_FADE_STATE_OUT: {
+            // Register value climbs towards 0xFF (mute), 0.5dB per step
+            uint8_t from = context->audioFadeFrom;
+            uint32_t span = PCM51XX_VOLUME_MUTE - from;
+            if (elapsed >= HANDLER_AUDIO_FADE_OUT_MS) {
+                context->audioFadeVolume = PCM51XX_VOLUME_MUTE;
+                context->audioFadeState = HANDLER_AUDIO_FADE_STATE_WAIT;
+            } else {
+                context->audioFadeVolume = from + (span * elapsed) / HANDLER_AUDIO_FADE_OUT_MS;
+            }
+            break;
+        }
+        case HANDLER_AUDIO_FADE_STATE_WAIT: {
+            if (now >= context->audioFadeDeadline) {
+                HandlerBTAudioFadeIn(context);
+            }
+            // Nothing to write while holding at mute
+            return;
+        }
+        case HANDLER_AUDIO_FADE_STATE_IN: {
+            // Read the target now so a gain change made mid-fade wins
+            uint8_t target = ConfigGetSetting(CONFIG_SETTING_DAC_AUDIO_VOL);
+            uint8_t from = context->audioFadeFrom;
+            if (elapsed >= HANDLER_AUDIO_FADE_IN_MS || from <= target) {
+                context->audioFadeVolume = target;
+                context->audioFadeState = HANDLER_AUDIO_FADE_STATE_IDLE;
+                TimerSetTaskInterval(context->audioFadeTimerId, TIMER_TASK_DISABLED);
+            } else {
+                uint32_t span = from - target;
+                context->audioFadeVolume = from - (span * elapsed) / HANDLER_AUDIO_FADE_IN_MS;
+            }
+            break;
+        }
+        default:
+            TimerSetTaskInterval(context->audioFadeTimerId, TIMER_TASK_DISABLED);
+            return;
+    }
+    if (PCM51XXSetVolumeFast(context->audioFadeVolume) != 0) {
+        // Do not keep hammering a broken bus - bail out to the known volume
+        LogError("FADE: I2C write failed, restoring volume");
+        HandlerBTAudioFadeCancel(context);
+    }
+}
+
 /**
  * HandlerTimerBTScanDevices()
  *     Description:

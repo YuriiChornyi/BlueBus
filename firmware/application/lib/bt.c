@@ -11,6 +11,7 @@
 #include "bt/bt_bm83.h"
 #include "bt/bt_common.h"
 #include "config.h"
+#include "event.h"
 #include "locale.h"
 #include "log.h"
 #include "timer.h"
@@ -550,6 +551,7 @@ void BTCommandPlaybackTrackNext(BT_t *bt)
     } else {
         BM83CommandMusicControl(bt, BM83_CMD_ACTION_NEXT);
     }
+    EventTriggerCallback(BT_EVENT_TRACK_SKIP, 0);
 }
 
 /**
@@ -568,6 +570,7 @@ void BTCommandPlaybackTrackPrevious(BT_t *bt)
     } else {
         BM83CommandMusicControl(bt, BM83_CMD_ACTION_PREVIOUS);
     }
+    EventTriggerCallback(BT_EVENT_TRACK_SKIP, 0);
 }
 
 /**

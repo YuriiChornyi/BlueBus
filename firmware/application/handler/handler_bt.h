@@ -18,6 +18,7 @@ void HandlerBTPairingStatus(void *, uint8_t *);
 void HandlerBTPairingsLoaded(void *, uint8_t *);
 void HandlerBTPlaybackStatus(void *, uint8_t *);
 void HandlerBTTimeUpdate(void *, uint8_t *);
+void HandlerBTTrackSkip(void *, uint8_t *);
 
 void HandlerUICloseConnection(void *, uint8_t *);
 void HandlerUIInitiateConnection(void *, uint8_t *);
@@ -30,6 +31,7 @@ void HandlerBTBM83Boot(void *, uint8_t *);
 void HandlerBTBM83BootStatus(void *, uint8_t *);
 void HandlerBTBM83DSPStatus(void *, uint8_t *);
 
+void HandlerTimerBTAudioFade(void *);
 void HandlerTimerBTScanDevices(void *);
 void HandlerTimerBTTCUStateChange(void *);
 

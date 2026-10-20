@@ -64,6 +64,20 @@
 #define HANDLER_INT_BM83_POWER_MFB_ON 150
 #define HANDLER_INT_BM83_POWER_MFB_OFF 500
 #define HANDLER_INT_PDC_DISTANCE 750
+// Audio fade on track skip (PCM51XX digital volume ramp)
+// Set to 0 to compile the feature out
+#define HANDLER_AUDIO_FADE_ENABLED 1
+#define HANDLER_INT_AUDIO_FADE 5
+#define HANDLER_AUDIO_FADE_OUT_MS 100
+#define HANDLER_AUDIO_FADE_IN_MS 200
+// Time to let the A2DP stream settle after AVRCP reports the track changed
+#define HANDLER_AUDIO_FADE_SETTLE_MS 250
+// Fade back in regardless if we never hear back about the track change
+#define HANDLER_AUDIO_FADE_WAIT_MAX_MS 1200
+#define HANDLER_AUDIO_FADE_STATE_IDLE 0
+#define HANDLER_AUDIO_FADE_STATE_OUT 1
+#define HANDLER_AUDIO_FADE_STATE_WAIT 2
+#define HANDLER_AUDIO_FADE_STATE_IN 3
 #define HANDLER_LM_BLINK_OFF 0x00
 #define HANDLER_LM_BLINK_LEFT 0x01
 #define HANDLER_LM_BLINK_RIGHT 0x02
@@ -171,6 +185,12 @@ typedef struct HandlerLightControlStatus_t {
  *  lightingStateTimerId:
  *  avrcpRegisterStatusNotifierTimerId:
  *  bm83PowerStateTimerId:
+ *  audioFadeTimerId:
+ *  audioFadeState: Where we are in the track skip fade
+ *  audioFadeFrom: The DAC volume register value the current ramp started at
+ *  audioFadeVolume: The DAC volume register value we last wrote
+ *  audioFadeRampStart: When the current ramp (out or in) started
+ *  audioFadeDeadline: When to start fading back in while waiting on the track
  *  cdChangerLastPoll:
  *  cdChangerLastStatus:
  *  gearLastStatus:
@@ -210,6 +230,12 @@ typedef struct HandlerContext_t {
     uint8_t lightingStateTimerId;
     uint8_t avrcpRegisterStatusNotifierTimerId;
     uint8_t bm83PowerStateTimerId;
+    uint8_t audioFadeTimerId;
+    uint8_t audioFadeState: 2;
+    uint8_t audioFadeFrom;
+    uint8_t audioFadeVolume;
+    uint32_t audioFadeRampStart;
+    uint32_t audioFadeDeadline;
     uint32_t cdChangerLastPoll;
     uint32_t cdChangerLastStatus;
     uint32_t gearLastStatus;
