@@ -911,7 +911,12 @@ void HandlerBTBM83AVRCPUpdates(void *ctx, uint8_t *data)
                 context->bt->avrcpUpdates,
                 BT_AVRCP_ACTION_GET_METADATA
             );
-            TimerResetScheduledTask(context->avrcpRegisterStatusNotifierTimerId);
+            // A "Changed" response de-registers the notification on the
+            // phone. Re-register right away rather than on the next timer
+            // tick (up to 1s out), otherwise a second skip inside that
+            // window is never reported and the metadata lags by ~1.25s.
+            // The manager then schedules the metadata fetch 250ms out.
+            TimerTriggerScheduledTask(context->avrcpRegisterStatusNotifierTimerId);
         }
     }
 }
